@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+python-dotenv
+langchain-core
+langchain-groq
+tzdata        # needed on Windows for time zones (Asia/Riyadh)
+pytest
+httpx         # needed by pytest to call the API

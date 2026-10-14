@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -7,7 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Employee, Task
+from app.models import AuditLog, Employee, Task
 from app.schemas import ChatRequest, ChatResponse
 from app.seed import initialize_database
 from app.services.authorization_service import AuthorizationError, tasks_for_scope
@@ -46,7 +47,58 @@ def health():
 def respond(actor: Employee, action: str, reply: str, task_id: int | None = None) -> ChatResponse:
     logger.info("audit user=%s role=%s action=%s task_id=%s", actor.id, actor.role, action, task_id)
     return ChatResponse(action=action, task_id=task_id, reply=reply)
+def save_audit(
+    db: Session,
+    user_id: int | None,
+    user_role: str | None,
+    action: str,
+    task_id: int | None = None,
+) -> None:
+    """Persist an audit event without storing the user's message."""
+    try:
+        entry = AuditLog(
+            user_id=user_id,
+            user_role=user_role,
+            action=action[:50],
+            task_id=task_id,
+        )
+        db.add(entry)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Could not persist audit event")
 
+
+def audit_response(
+    db: Session,
+    actor: Employee,
+    response: ChatResponse | JSONResponse,
+):
+    """Record the response action, then return the original response unchanged."""
+    if isinstance(response, JSONResponse):
+        try:
+            data = json.loads(response.body)
+        except (ValueError, TypeError):
+            data = {}
+
+        action = data.get("action", "error")
+        task_id = data.get("task_id")
+    else:
+        action = response.action
+        task_id = response.task_id
+
+    if not isinstance(task_id, int):
+        task_id = None
+
+    save_audit(
+        db=db,
+        user_id=actor.id,
+        user_role=str(actor.role),
+        action=str(action),
+        task_id=task_id,
+    )
+
+    return response
 
 def error_response(status_code: int, reply: str) -> JSONResponse:
     # Same JSON shape as a normal answer. Technical details go to the log, never to the user.
@@ -133,37 +185,78 @@ def handle_policy(actor: Employee, message: str):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest, db: Session = Depends(get_db)):
-    # The role comes from the database. Nothing written in the message can change it.
+    # The role comes from the database, never from the user's message.
     actor = db.get(Employee, payload.user_id)
+
     if actor is None:
+        save_audit(
+            db=db,
+            user_id=payload.user_id,
+            user_role=None,
+            action="unknown_user",
+        )
         raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
 
     message = payload.message.strip()
+
     if not message:
-        return respond(actor, "clarification", "الرسالة فارغة. يُرجى كتابة طلبك.")
+        result = respond(
+            actor,
+            "clarification",
+            "الرسالة فارغة. يرجى كتابة طلبك.",
+        )
 
-    # Fast path: "my tasks" needs no LLM.
-    if re.sub(r"[^\w\s]", "", normalize_ar(message)).strip() in MY_TASKS_PHRASES:
-        return handle_list(db, actor, "mine", None)
+    elif re.sub(r"[^\w\s]", "", normalize_ar(message)).strip() in MY_TASKS_PHRASES:
+        result = handle_list(db, actor, "mine", None)
 
-    try:
-        parsed = parse_intent(message)
-    except LLMNotConfiguredError:
-        logger.error("GROQ_API_KEY is missing: set it in .env")
-        return error_response(503, "الخدمة غير مهيأة حاليًا. يُرجى التواصل مع مسؤول النظام.")
-    except Exception:
-        logger.exception("Could not understand the message")
-        return error_response(502, "تعذّر فهم الرسالة الآن بسبب خلل مؤقت. يُرجى المحاولة بعد قليل.")
+    else:
+        try:
+            parsed = parse_intent(message)
 
-    intent, scope = parsed["intent"], parsed.get("scope")
-    if intent == "unknown" and any(hint in normalize_ar(message) for hint in ALL_TASKS_HINTS):
-        intent, scope = "list_tasks", "all"
+        except LLMNotConfiguredError:
+            logger.error("GROQ_API_KEY is missing: set it in .env")
+            result = error_response(
+                503,
+                "الخدمة غير مهيأة حاليًا. يرجى التواصل مع مسؤول النظام.",
+            )
 
-    if intent == "list_tasks":
-        return handle_list(db, actor, scope or "mine", parsed.get("assignee_name"))
-    if intent == "policy_question":
-        return handle_policy(actor, message)
-    if intent == "create_task":
-        return handle_create(db, actor, parsed.get("assignee_name"), parsed.get("description"), message)
+        except Exception:
+            logger.exception("Could not understand the message")
+            result = error_response(
+                502,
+                "تعذّر فهم الرسالة الآن بسبب خلل مؤقت. يرجى المحاولة بعد قليل.",
+            )
 
-    return respond(actor, "clarification", "لم أفهم طلبك. يمكنني تسجيل مهمة، أو عرض مهامك، أو الإجابة عن سياسة الشركة.")
+        else:
+            intent, scope = parsed["intent"], parsed.get("scope")
+
+            if intent == "unknown" and any(
+                hint in normalize_ar(message) for hint in ALL_TASKS_HINTS
+            ):
+                intent, scope = "list_tasks", "all"
+
+            if intent == "list_tasks":
+                result = handle_list(
+                    db, actor, scope or "mine", parsed.get("assignee_name")
+                )
+
+            elif intent == "policy_question":
+                result = handle_policy(actor, message)
+
+            elif intent == "create_task":
+                result = handle_create(
+                    db,
+                    actor,
+                    parsed.get("assignee_name"),
+                    parsed.get("description"),
+                    message,
+                )
+
+            else:
+                result = respond(
+                    actor,
+                    "clarification",
+                    "لم أفهم طلبك. يمكنني تسجيل مهمة، أو عرض مهامك، أو الإجابة عن سياسة الشركة.",
+                )
+
+    return audit_response(db, actor, result)

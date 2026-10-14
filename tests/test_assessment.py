@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import main  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
-from app.models import Task  # noqa: E402
+from app.models import AuditLog, Task  # noqa: E402
 from app.services import date_service  # noqa: E402
 from app.services.date_service import parse_due  # noqa: E402
 
@@ -64,11 +64,17 @@ def client():
 
 @pytest.fixture(autouse=True)
 def empty_tasks_table():
-    yield
     with SessionLocal() as db:
+        db.query(AuditLog).delete()
         db.query(Task).delete()
         db.commit()
 
+    yield
+
+    with SessionLocal() as db:
+        db.query(AuditLog).delete()
+        db.query(Task).delete()
+        db.commit()
 
 def chat(client, user_id, message):
     response = client.post("/chat", json={"user_id": user_id, "message": message})
@@ -270,3 +276,53 @@ DATE_CASES = [
 def test_parse_due(message, today, expected_date, expected_time, moved):
     due = parse_due(message, today=today)
     assert (due.due_date, due.due_time, due.moved_from_friday) == (expected_date, expected_time, moved)
+def test_audit_log_records_list_operation(client):
+    message = next(
+        message
+        for message, parsed in FAKE_LLM.items()
+        if parsed["intent"] == "list_tasks"
+        and parsed.get("scope") == "all"
+    )
+
+    body = chat(client, 1, message)
+
+    assert body["action"] == "list_tasks"
+
+    with SessionLocal() as db:
+        logs = db.query(AuditLog).all()
+
+        assert len(logs) == 1
+        log = logs[0]
+        assert log.user_id == 1
+        assert log.user_role == "manager"
+        assert log.action == "list_tasks"
+        assert log.task_id is None
+        assert log.created_at is not None
+
+        columns = set(AuditLog.__table__.columns.keys())
+        assert "message" not in columns
+
+
+def test_audit_log_records_created_task_id(client):
+    message = next(
+        message
+        for message, parsed in FAKE_LLM.items()
+        if parsed["intent"] == "create_task"
+        and parsed.get("assignee_name")
+        and parsed.get("description")
+    )
+
+    body = chat(client, 2, message)
+
+    assert body["action"] == "create_task"
+    assert body["task_id"] is not None
+
+    with SessionLocal() as db:
+        logs = db.query(AuditLog).all()
+
+        assert len(logs) == 1
+        log = logs[0]
+        assert log.user_id == 2
+        assert log.user_role == "supervisor"
+        assert log.action == "create_task"
+        assert log.task_id == body["task_id"]

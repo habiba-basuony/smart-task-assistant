@@ -1,15 +1,16 @@
 import json
 import logging
 import re
+import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AuditLog, Employee, Task
-from app.schemas import ChatRequest, ChatResponse
 from app.seed import initialize_database
 from app.services.authorization_service import AuthorizationError, tasks_for_scope
 from app.services.date_service import WEEKDAYS_AR
@@ -17,6 +18,29 @@ from app.services.llm_service import LLMNotConfiguredError, parse_intent
 from app.services.rag_service import RAGNotConfiguredError, answer_policy_question
 from app.services.task_service import NeedsClarification, create_task, find_employee
 from app.services.text_utils import normalize_ar
+
+from app.config import TELEGRAM_INTERNAL_TOKEN, TELEGRAM_LINK_ADMIN_TOKEN
+
+from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    TelegramIssueCodeRequest,
+    TelegramIssueCodeResponse,
+    TelegramLinkRequest,
+    TelegramLinkResponse,
+    TelegramResolveRequest,
+    TelegramResolveResponse,
+)
+
+
+from app.services.telegram_link_service import (
+    LINK_CODE_TTL_SECONDS,
+    TelegramLinkError,
+    issue_link_code,
+    redeem_link_code,
+    resolve_telegram_employee,
+)
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("smart_task_assistant")
@@ -41,6 +65,132 @@ app = FastAPI(title="Smart Task Assistant", version="0.2.0", lifespan=lifespan)
 def health():
     return {"status": "ok"}
 
+
+# ---------- Telegram account linking ----------
+
+def require_telegram_admin(
+    authorization: str | None = Header(default=None),
+) -> None:
+    if not TELEGRAM_LINK_ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Telegram link administration is not configured.",
+        )
+
+    expected = f"Bearer {TELEGRAM_LINK_ADMIN_TOKEN}"
+    if not authorization or not secrets.compare_digest(
+        authorization, expected
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_telegram_internal(
+    authorization: str | None = Header(default=None),
+) -> None:
+    if not TELEGRAM_INTERNAL_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Telegram internal access is not configured.",
+        )
+
+    expected = f"Bearer {TELEGRAM_INTERNAL_TOKEN}"
+    if not authorization or not secrets.compare_digest(
+        authorization, expected
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post(
+    "/telegram/issue-code",
+    response_model=TelegramIssueCodeResponse,
+)
+def telegram_issue_code(
+    payload: TelegramIssueCodeRequest,
+    _: None = Depends(require_telegram_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        code = issue_link_code(db, payload.employee_id)
+    except TelegramLinkError as exc:
+        if exc.error_code == "employee_not_found":
+            raise HTTPException(
+                status_code=404,
+                detail="الموظف غير موجود.",
+            ) from exc
+
+        if "linked" in exc.error_code or "already" in exc.error_code:
+            raise HTTPException(
+                status_code=409,
+                detail="الموظف مرتبط بالفعل بحساب Telegram.",
+            ) from exc
+
+        raise HTTPException(
+            status_code=400,
+            detail="تعذر إصدار كود الربط.",
+        ) from exc
+
+    return TelegramIssueCodeResponse(
+        employee_id=payload.employee_id,
+        code=code,
+        expires_in_seconds=LINK_CODE_TTL_SECONDS,
+        reply="تم إصدار كود ربط صالح لمدة 10 دقائق.",
+    )
+
+
+@app.post(
+    "/telegram/link",
+    response_model=TelegramLinkResponse,
+)
+def telegram_link(
+    payload: TelegramLinkRequest,
+    _: None = Depends(require_telegram_internal),
+    db: Session = Depends(get_db),
+):
+    try:
+        redeem_link_code(
+            db,
+            payload.telegram_user_id,
+            payload.code,
+        )
+    except TelegramLinkError as exc:
+        if "linked" in exc.error_code or "already" in exc.error_code:
+            raise HTTPException(
+                status_code=409,
+                detail="حساب Telegram أو الموظف مرتبط بالفعل.",
+            ) from exc
+
+        raise HTTPException(
+            status_code=400,
+            detail="كود الربط غير صالح أو منتهي الصلاحية.",
+        ) from exc
+
+    return TelegramLinkResponse(
+        linked=True,
+        reply="تم ربط حساب Telegram بنجاح.",
+    )
+
+
+@app.post(
+    "/telegram/resolve",
+    response_model=TelegramResolveResponse,
+)
+def telegram_resolve(
+    payload: TelegramResolveRequest,
+    _: None = Depends(require_telegram_internal),
+    db: Session = Depends(get_db),
+):
+    employee_id = resolve_telegram_employee(
+        db,
+        payload.telegram_user_id,
+    )
+
+    if employee_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail="حساب Telegram غير مرتبط بموظف.",
+        )
+
+    return TelegramResolveResponse(employee_id=employee_id)
 
 # ---------- helpers ----------
 

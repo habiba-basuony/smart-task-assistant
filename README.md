@@ -261,3 +261,83 @@ This script uses the configured model and requires a valid API key and a reachab
 - The application depends on the configured Groq model being available to the account. Model access and pricing may change.
 
 More implementation assumptions, workload estimates, cost estimates, and proposed next steps are documented in [DECISIONS.md](DECISIONS.md).
+
+
+## Telegram Bot
+
+The project supports linking individual Telegram accounts to employee records.
+After a successful link, the bot resolves the employee from the stored Telegram
+account link. Employees do not need to enter their employee ID with each
+message.
+
+### Configuration
+
+Add the following variables to your local `.env` file:
+
+- `TELEGRAM_BOT_TOKEN`: Bot token obtained from BotFather.
+- `TELEGRAM_INTERNAL_TOKEN`: Shared secret used by the bot to call the
+  protected internal Telegram endpoints.
+- `TELEGRAM_LINK_ADMIN_TOKEN`: Secret required to issue employee linking codes.
+- `TELEGRAM_API_URL`: Chat API URL. The Docker Compose bot service uses
+  `http://api:8000/chat` inside the Compose network.
+
+Keep real credentials in `.env` only. Never commit `.env` or paste secret
+values into source code, documentation, screenshots, or unredacted logs.
+Use `.env.example` as a template without real secret values.
+
+### Run with Docker
+
+From the project directory:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+The Compose services are:
+
+- `api`: FastAPI application.
+- `bot`: Telegram polling bot.
+
+To inspect recent API logs:
+
+```powershell
+docker compose logs --tail 30 api
+```
+
+Telegram bot logs may contain bot-token URLs. Review and redact secrets before
+sharing logs.
+
+### Link an Employee
+
+1. An authorized administrator issues a linking code for an existing employee
+   through `POST /telegram/issue-code`, authenticated with
+   `TELEGRAM_LINK_ADMIN_TOKEN` as a Bearer token. The request body contains
+   `employee_id`.
+2. The linking code contains exactly 6 digits, expires after 10 minutes,
+   and can be used successfully only once. Five failed attempts for the
+   same Telegram account trigger a temporary 10-minute lock.
+3. The employee opens the bot in a private Telegram chat and sends:
+
+   `/link CODE`
+
+   Replace `CODE` with the actual code. Do not share the code publicly.
+4. The bot submits the Telegram account ID and code to the protected
+   `POST /telegram/link` endpoint.
+5. After linking, the bot resolves the employee through
+   `POST /telegram/resolve` for subsequent messages.
+
+The link is stored in the database, so deleting the Telegram conversation
+does not remove the saved account link. A new Telegram account must be linked
+separately.
+
+### Telegram Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/telegram/issue-code` | Issue a linking code for an employee; admin token required. |
+| `POST` | `/telegram/link` | Redeem a code to link a Telegram account; internal token required. |
+| `POST` | `/telegram/resolve` | Resolve a linked Telegram account to an employee; internal token required. |
+
+Do not expose internal or administrative endpoints publicly without
+appropriate authentication, access controls, and rate limiting.

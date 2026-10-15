@@ -6,4 +6,6 @@ langchain-core
 langchain-groq
 tzdata        # needed on Windows for time zones (Asia/Riyadh)
 pytest
-httpx         # needed by pytest to call the API
+httpx
+python-telegram-bot==22.8
+     # needed by pytest to call the API

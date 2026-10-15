@@ -32,6 +32,7 @@ def find_employee(db: Session, name: str | None) -> Employee | None:
     return None
 
 
+
 def create_task(
     db: Session,
     actor: Employee,
@@ -44,6 +45,8 @@ def create_task(
 
     if not description or not description.strip():
         raise NeedsClarification("ما هي المهمة المطلوب تسجيلها؟")
+
+    clean_description = " ".join(description.split()).casefold()
 
     due = parse_due(message)
 
@@ -64,8 +67,31 @@ def create_task(
             "ما اليوم المطلوب لهذا الموعد؟"
         )
 
+    # Check for an identical pending task before inserting a new record.
+    existing_tasks = (
+        db.query(Task)
+        .filter(
+            Task.assigned_to == assignee.id,
+            Task.due_date == due.due_date,
+            Task.due_time == due.due_time,
+            Task.status == "pending",
+        )
+        .all()
+    )
+
+    for existing in existing_tasks:
+        existing_description = " ".join(
+            (existing.description or "").split()
+        ).casefold()
+
+        if existing_description == clean_description:
+            raise NeedsClarification(
+                "المهمة دي مسجلة بالفعل لنفس الموظف وبنفس الموعد، "
+                "فما أضفتش نسخة مكررة."
+            )
+
     task = Task(
-        description=description.strip(),
+        description=" ".join(description.split()),
         created_by=actor.id,
         assigned_to=assignee.id,
         due_date=due.due_date,

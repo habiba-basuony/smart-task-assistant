@@ -1,3 +1,4 @@
+
 services:
   api:
     build: .
@@ -7,8 +8,20 @@ services:
       - .env
     environment:
       DATABASE_URL: "sqlite:////app/app_data/smart_tasks.db"
+      TELEGRAM_BOT_TOKEN: ""
     volumes:
       - task_data:/app/app_data
+    restart: unless-stopped
+
+  bot:
+    build: .
+    command: ["python", "-m", "app.telegram_bot"]
+    environment:
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN in .env}"
+      TELEGRAM_INTERNAL_TOKEN: "${TELEGRAM_INTERNAL_TOKEN:?Missing TELEGRAM_INTERNAL_TOKEN in .env}"
+      TELEGRAM_API_URL: "http://api:8000/chat"
+    depends_on:
+      - api
     restart: unless-stopped
 
 volumes:

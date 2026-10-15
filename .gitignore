@@ -1,31 +1,50 @@
+
 # Secrets and local configuration
 .env
 .env.*
 !.env.example
 
-# Python environments and caches
+# Python virtual environments
 .venv/
 venv/
 env/
+
+# Python cache files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Testing, linting, and coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
 
-# Local databases and generated data
-app_data/*.db
-app_data/*.sqlite
-app_data/*.sqlite3
+# Local databases and application data
+app_data/
 *.db
 *.sqlite
 *.sqlite3
 
-# Logs and operating-system/editor files
+# Logs
 *.log
+
+# Operating system files
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# IDE and editor settings
 .vscode/
 .idea/
+
+# Build and distribution artifacts
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.bak

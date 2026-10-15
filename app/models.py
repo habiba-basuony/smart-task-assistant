@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timezone
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, Time
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Integer, String, Text, Time
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -41,5 +41,86 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+class TelegramUserLink(Base):
+    __tablename__ = "telegram_user_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    telegram_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        unique=True,
+        nullable=False,
+    )
+
+    employee_id: Mapped[int] = mapped_column(
+        ForeignKey("employees.id"),
+        unique=True,
+        nullable=False,
+    )
+
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    employee = relationship("Employee")
+
+
+class TelegramLinkCode(Base):
+    __tablename__ = "telegram_link_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    code_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+    )
+
+    employee_id: Mapped[int] = mapped_column(
+        ForeignKey("employees.id"),
+        nullable=False,
+    )
+
+    # Unix timestamps make expiry checks straightforward.
+    expires_at: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+    used_at: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    employee = relationship("Employee")
+
+class TelegramLinkAttempt(Base):
+    __tablename__ = "telegram_link_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    failed_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+    )
+    locked_until: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
         nullable=False,
     )
